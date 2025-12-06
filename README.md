@@ -231,3 +231,171 @@ Indexed and optimized queries
 Fully tested CRUD operations
 
 Zero warnings or schema issues
+
+Task 3 — User Registration & Login Interface (Frontend)
+
+This task delivers a complete authentication UI for the Intelligent Book Summarizer platform using Streamlit. It provides a clean design, strong validation, and smooth navigation between registration and login pages.
+
+Key Features
+Registration
+
+Full Name, Email, Password, Confirm Password fields
+
+Real-time validation:
+
+Name: required, letters/spaces only, min 2 characters
+
+Email: validated using regex
+
+Password: min 8 characters, must include uppercase, lowercase, number, special character
+
+Confirm Password: must match
+
+Clear field-level error messages
+
+Register button + link to login page
+
+Login
+
+Email and Password fields
+
+Optional “Remember me” checkbox
+
+Login button
+
+Link to registration page
+
+“Forgot Password?” placeholder
+
+UI & Functionality
+
+Built with st.form() to prevent re-runs
+
+Professional layout using columns and custom CSS
+
+Password fields use hidden input
+
+Success/error messages using Streamlit alerts
+
+Loading indicators with st.spinner()
+
+Backend hooks included (optional for now)
+
+How to Run
+pip install streamlit
+streamlit run frontend/auth.py
+
+Task 4: Authentication Backend & Session Management
+
+This task implements the complete backend logic for user authentication, secure password handling, and session management.
+
+Features Completed
+
+User registration with:
+
+Input validation (name, email, password)
+
+Duplicate email check
+
+Secure password hashing using bcrypt
+
+User login with:
+
+Password verification
+
+Generic authentication errors (no email/password leakage)
+
+Basic login attempt rate limiting
+
+Session management using Streamlit:
+
+Store login state and user details
+
+Session expiration handling
+
+Logout functionality that clears session data
+
+Error handling for:
+
+Invalid inputs
+
+Database failures
+
+Incorrect credentials
+
+Database
+
+Uses SQLite.
+
+Users, Books, and Summaries tables are created through init_db() in utils/database.py.
+
+Testing
+
+All authentication and database functions are covered through pytest.
+
+Fresh temporary DB is created for each test.
+
+Test suite passes consistently (11 passed).
+
+How to Use
+
+Ensure virtual environment is active.
+
+Initialize database:
+
+python utils/create_db.py
+
+
+Use backend functions:
+
+register_user()
+
+login_user()
+
+login_to_session()
+
+is_logged_in()
+
+logout()
+
+Task 5: File Upload Interface (Frontend)
+
+This task adds the Streamlit page used to upload book files for summarization. Users can upload TXT, PDF, or DOCX files, add optional metadata, preview the file, and track upload history.
+
+Features
+
+Upload files up to 10 MB
+
+Supports .txt, .pdf, .docx
+
+Automatic validation for size, format, corruption
+
+Duplicate file detection using SHA256
+
+Optional metadata: title, author, chapter
+
+File preview
+
+TXT: first 500 characters
+
+PDF: page count
+
+DOCX: paragraph count and first paragraph
+
+Upload & Process button with progress indicator
+
+Upload history table with status, delete option, and summary link support
+
+How to Run
+pip install streamlit PyPDF2 python-docx
+streamlit run frontend/upload.py
+
+Output
+
+Uploaded files saved in data/uploads/
+
+Upload details stored in data/uploads.db
+
+History displayed on the UI
+
+Ready to connect with backend summarization API
