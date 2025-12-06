@@ -1,0 +1,20 @@
+.venv/
+venv/
+env/
+ECHO is on.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+ECHO is on.
+.env
+ECHO is on.
+data/
+uploads/
+*.sqlite3
+ECHO is on.
+.vscode/
+.idea/
+ECHO is on.
+.DS_Store
+Thumbs.db
