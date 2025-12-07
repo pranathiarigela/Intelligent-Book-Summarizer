@@ -399,3 +399,46 @@ Upload details stored in data/uploads.db
 History displayed on the UI
 
 Ready to connect with backend summarization API
+
+Task 6 – Text Extraction (Backend)
+Overview
+
+This module extracts text from TXT, PDF, and DOCX files, cleans it, and stores the results in SQLite. It supports multiple encodings, PDF fallbacks, and handles common errors like scanned or password-protected files.
+
+Features
+
+TXT, PDF, DOCX extraction
+
+PDF fallback (PyPDF → pdfplumber)
+
+Scanned PDF detection
+
+Paragraph and line-break preservation
+
+Text cleaning and normalization
+
+Word and character count
+
+Error cases handled gracefully
+
+Database
+
+Extraction results are stored using:
+
+update_book_text(book_id, raw_text, word_count, char_count, status, extraction_time, extra)
+
+
+All data is saved into the books table.
+
+Usage
+from backend.text_extractor import extract_text
+from utils.db_hooks import update_book_text
+
+extract_text(file_path, book_id=book_id, db_update_hook=update_book_text)
+
+Dependencies
+chardet
+python-docx
+pypdf
+pdfplumber
+

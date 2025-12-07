@@ -1,0 +1,2 @@
+Hello, this is a sample test file.
+Text extraction should detect this content.
