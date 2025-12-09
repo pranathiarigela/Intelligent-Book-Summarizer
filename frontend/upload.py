@@ -155,207 +155,208 @@ def docx_basic_info(file_stream):
 # -----------------------
 # UI
 # -----------------------
-st.set_page_config(page_title="Upload Book for Summarization", layout="wide")
-init_db()
+def main():
+    st.set_page_config(page_title="Upload Book for Summarization", layout="wide")
+    init_db()
 
-st.title("Upload Book for Summarization")
+    st.title("Upload Book for Summarization")
 
-with st.expander("Instructions", expanded=True):
-    st.markdown(
-        """
-        Supported formats: **.txt, .pdf, .docx**  
-        Maximum file size: **10 MB**.  
-        Upload will validate the file and store it. After upload you can click **Upload & Process** to trigger the backend summarization workflow.
-        """
-    )
+    with st.expander("Instructions", expanded=True):
+        st.markdown(
+            """
+            Supported formats: **.txt, .pdf, .docx**  
+            Maximum file size: **10 MB**.  
+            Upload will validate the file and store it. After upload you can click **Upload & Process** to trigger the backend summarization workflow.
+            """
+        )
 
-col1, col2 = st.columns([2, 1])
-with col1:
-    uploaded_file = st.file_uploader(
-        "Choose a book file",
-        type=["txt", "pdf", "docx"],
-        help="Maximum file size: 10MB"
-    )
-with col2:
-    st.write("Metadata (optional)")
-    title_input = st.text_input("Book Title")
-    author_input = st.text_input("Author")
-    chapter_input = st.text_input("Chapter / Section")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Choose a book file",
+            type=["txt", "pdf", "docx"],
+            help="Maximum file size: 10MB"
+        )
+    with col2:
+        st.write("Metadata (optional)")
+        title_input = st.text_input("Book Title")
+        author_input = st.text_input("Author")
+        chapter_input = st.text_input("Chapter / Section")
 
-# Validation & Preview area
-if uploaded_file is not None:
-    filename = uploaded_file.name
-    ext = get_extension(filename)
-    filesize = uploaded_file.size
+    # Validation & Preview area
+    if uploaded_file is not None:
+        filename = uploaded_file.name
+        ext = get_extension(filename)
+        filesize = uploaded_file.size
 
-    # Basic validations
-    if ext not in ALLOWED_EXT:
-        st.error(f"Unsupported file extension: {ext}. Allowed: {', '.join(ALLOWED_EXT)}")
-        st.stop()
-
-    if filesize == 0:
-        st.error("Uploaded file is empty.")
-        st.stop()
-
-    if filesize > MAX_FILE_SIZE:
-        st.error(f"File too large ({filesize} bytes). Maximum is {MAX_FILE_SIZE} bytes.")
-        st.stop()
-
-    # Read bytes for validation + duplicate detection
-    file_bytes = uploaded_file.read()
-    filehash = compute_hash(file_bytes)
-    # Reset buffer pointer for downstream readers
-    uploaded_file.seek(0)
-
-    # Check duplicate by filehash in DB
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, title, filename, uploaded_at FROM books WHERE filehash = ?", (filehash,))
-    duplicate = cur.fetchone()
-    conn.close()
-    if duplicate:
-        st.warning(f"A file with the same content was uploaded earlier ({duplicate[2]} on {duplicate[3]}).")
-        if not st.checkbox("Proceed anyway and upload duplicate"):
+        # Basic validations
+        if ext not in ALLOWED_EXT:
+            st.error(f"Unsupported file extension: {ext}. Allowed: {', '.join(ALLOWED_EXT)}")
             st.stop()
 
-    st.subheader("File preview & info")
-    st.write(f"**Filename:** {filename}")
-    st.write(f"**Size:** {filesize} bytes")
-    st.write(f"**Uploaded (in this form):** {datetime.now(UTC).isoformat()}")
+        if filesize == 0:
+            st.error("Uploaded file is empty.")
+            st.stop()
 
-    preview_cols = st.columns([1, 1])
-    with preview_cols[0]:
-        if ext == ".txt":
-            preview = read_txt_preview(file_bytes, limit=500)
-            if preview is None:
-                st.error("Could not decode TXT file. It may use an unsupported encoding or be corrupted.")
-            else:
-                st.text_area("TXT preview (first 500 chars)", preview, height=200)
-        elif ext == ".pdf":
-            try:
-                # For PyPDF2 we need a bytes stream
-                stream = io.BytesIO(file_bytes)
-                pages = pdf_num_pages(stream)
-                if pages is None:
-                    st.error("Could not read PDF. It might be corrupted or scanned (image-only).")
+        if filesize > MAX_FILE_SIZE:
+            st.error(f"File too large ({filesize} bytes). Maximum is {MAX_FILE_SIZE} bytes.")
+            st.stop()
+
+        # Read bytes for validation + duplicate detection
+        file_bytes = uploaded_file.read()
+        filehash = compute_hash(file_bytes)
+        # Reset buffer pointer for downstream readers
+        uploaded_file.seek(0)
+
+        # Check duplicate by filehash in DB
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, title, filename, uploaded_at FROM books WHERE filehash = ?", (filehash,))
+        duplicate = cur.fetchone()
+        conn.close()
+        if duplicate:
+            st.warning(f"A file with the same content was uploaded earlier ({duplicate[2]} on {duplicate[3]}).")
+            if not st.checkbox("Proceed anyway and upload duplicate"):
+                st.stop()
+
+        st.subheader("File preview & info")
+        st.write(f"**Filename:** {filename}")
+        st.write(f"**Size:** {filesize} bytes")
+        st.write(f"**Uploaded (in this form):** {datetime.now(UTC).isoformat()}")
+
+        preview_cols = st.columns([1, 1])
+        with preview_cols[0]:
+            if ext == ".txt":
+                preview = read_txt_preview(file_bytes, limit=500)
+                if preview is None:
+                    st.error("Could not decode TXT file. It may use an unsupported encoding or be corrupted.")
                 else:
-                    st.write(f"Number of pages: **{pages}**")
-            except Exception as e:
-                st.error("Error reading PDF: " + str(e))
-        elif ext == ".docx":
-            try:
-                stream = io.BytesIO(file_bytes)
-                info = docx_basic_info(stream)
-                if info is None:
-                    st.error("Could not read DOCX. It might be corrupted.")
-                else:
-                    st.write(f"Paragraphs: **{info['paragraphs']}**")
-                    if info['first_par']:
-                        st.text_area("First paragraph", info['first_par'], height=150)
-            except Exception as e:
-                st.error("Error reading DOCX: " + str(e))
-
-    # Pre-fill title from filename if title_input is empty
-    if not title_input:
-        inferred_title = os.path.splitext(filename)[0]
-        st.info(f"Auto-filled title from filename: {inferred_title}")
-        title_input = st.text_input("Book Title (edit if needed)", value=inferred_title)
-
-    # Upload & Process button
-    if st.button("Upload & Process"):
-        # Save file to disk
-        timestamp = datetime.now(UTC).isoformat()
-        safe_filename = f"{int(datetime.now(UTC).timestamp())}_{filename}"
-        dest_path = os.path.join(UPLOAD_DIR, safe_filename)
-
-        try:
-            with st.spinner("Saving file..."):
-                # write bytes to disk
-                with open(dest_path, "wb") as f:
-                    f.write(file_bytes)
-
-            # determine pages for storing metadata
-            pages = None
-            if ext == ".pdf":
+                    st.text_area("TXT preview (first 500 chars)", preview, height=200)
+            elif ext == ".pdf":
                 try:
-                    pages = pdf_num_pages(io.BytesIO(file_bytes))
-                except Exception:
-                    pages = None
+                    # For PyPDF2 we need a bytes stream
+                    stream = io.BytesIO(file_bytes)
+                    pages = pdf_num_pages(stream)
+                    if pages is None:
+                        st.error("Could not read PDF. It might be corrupted or scanned (image-only).")
+                    else:
+                        st.write(f"Number of pages: **{pages}**")
+                except Exception as e:
+                    st.error("Error reading PDF: " + str(e))
             elif ext == ".docx":
                 try:
-                    info = docx_basic_info(io.BytesIO(file_bytes))
-                    pages = info["paragraphs"] if info else None
-                except Exception:
-                    pages = None
+                    stream = io.BytesIO(file_bytes)
+                    info = docx_basic_info(stream)
+                    if info is None:
+                        st.error("Could not read DOCX. It might be corrupted.")
+                    else:
+                        st.write(f"Paragraphs: **{info['paragraphs']}**")
+                        if info['first_par']:
+                            st.text_area("First paragraph", info['first_par'], height=150)
+                except Exception as e:
+                    st.error("Error reading DOCX: " + str(e))
 
-            rec = {
-                "user_id": None,
-                "title": title_input or inferred_title,
-                "author": author_input,
-                "chapter": chapter_input,
-                "filename": filename,
-                "filepath": dest_path,
-                "filesize": filesize,
-                "filehash": filehash,
-                "pages": pages,
-                "uploaded_at": timestamp,
-                "status": "uploaded"
-            }
-            book_id = insert_book(rec)
-            st.success(f"File saved and metadata stored (book id: {book_id}).")
+        # Pre-fill title from filename if title_input is empty
+        if not title_input:
+            inferred_title = os.path.splitext(filename)[0]
+            st.info(f"Auto-filled title from filename: {inferred_title}")
+            title_input = st.text_input("Book Title (edit if needed)", value=inferred_title)
 
-            # Show progress for file-handling step
-            progress_bar = st.progress(0)
-            for i in range(5):
-                progress_bar.progress((i + 1) * 20)
-            progress_bar.empty()
+        # Upload & Process button
+        if st.button("Upload & Process"):
+            # Save file to disk
+            timestamp = datetime.now(UTC).isoformat()
+            safe_filename = f"{int(datetime.now(UTC).timestamp())}_{filename}"
+            dest_path = os.path.join(UPLOAD_DIR, safe_filename)
 
-            st.info("To start summarization, the frontend should call the backend orchestration endpoint for this book_id.")
-            st.write("Example (placeholder):")
-            st.code(f'POST /api/summarize?book_id={book_id}  # call your backend job runner/orchestrator', language="bash")
+            try:
+                with st.spinner("Saving file..."):
+                    # write bytes to disk
+                    with open(dest_path, "wb") as f:
+                        f.write(file_bytes)
 
-            # Optionally update status to processing here if you trigger backend immediately
-            # update_book_status(book_id, "processing")
-        except Exception as e:
-            st.error(f"Failed to save file: {e}")
+                # determine pages for storing metadata
+                pages = None
+                if ext == ".pdf":
+                    try:
+                        pages = pdf_num_pages(io.BytesIO(file_bytes))
+                    except Exception:
+                        pages = None
+                elif ext == ".docx":
+                    try:
+                        info = docx_basic_info(io.BytesIO(file_bytes))
+                        pages = info["paragraphs"] if info else None
+                    except Exception:
+                        pages = None
 
-# -----------------------
-# Upload history section
-# -----------------------
-st.markdown("---")
-st.header("Upload history / status")
+                rec = {
+                    "user_id": None,
+                    "title": title_input or inferred_title,
+                    "author": author_input,
+                    "chapter": chapter_input,
+                    "filename": filename,
+                    "filepath": dest_path,
+                    "filesize": filesize,
+                    "filehash": filehash,
+                    "pages": pages,
+                    "uploaded_at": timestamp,
+                    "status": "uploaded"
+                }
+                book_id = insert_book(rec)
+                st.success(f"File saved and metadata stored (book id: {book_id}).")
 
-books = get_all_books()
-if not books:
-    st.info("No uploads yet. Use the form above to add a book.")
-else:
-    # Render a simple table and actions
-    for row in books:
-        book_id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id = row
-        with st.container():
-            cols = st.columns([3, 1, 1, 1])
-            cols[0].markdown(f"**{title}**  \n*{filename}*  \nAuthor: {author or '—'}  \nChapter: {chapter or '—'}")
-            cols[1].markdown(f"Uploaded: {uploaded_at}")
-            cols[2].markdown(f"Status: **{status}**")
-            action_col = cols[3]
-            # View summary button (enabled only if summary exists)
-            if summary_id:
-                if action_col.button("View Summary", key=f"view_{book_id}"):
-                    # Implement navigation to summary page or open a new tab with summary
-                    # Placeholder: instruct user; in your app you'd call st.experimental_set_query_params or navigate to page
-                    st.session_state.setdefault("navigate_to_summary", None)
-                    st.session_state["navigate_to_summary"] = summary_id
-                    st.success(f"Would navigate to summary {summary_id}. Implement page: frontend/summary.py")
-            else:
-                action_col.write("")  # keep layout
+                # Show progress for file-handling step
+                progress_bar = st.progress(0)
+                for i in range(5):
+                    progress_bar.progress((i + 1) * 20)
+                progress_bar.empty()
 
-            # Delete button
-            if action_col.button("Delete", key=f"del_{book_id}"):
-                delete_book_db(book_id)
-                st.experimental_rerun()
+                st.info("To start summarization, the frontend should call the backend orchestration endpoint for this book_id.")
+                st.write("Example (placeholder):")
+                st.code(f'POST /api/summarize?book_id={book_id}  # call your backend job runner/orchestrator', language="bash")
 
-    st.write("Tip: If you implement async background processing in backend, update the 'status' field using update_book_status(book_id, 'processing'/'completed'/'failed').")
+                # Optionally update status to processing here if you trigger backend immediately
+                # update_book_status(book_id, "processing")
+            except Exception as e:
+                st.error(f"Failed to save file: {e}")
 
-# -----------------------
-# End
-# -----------------------
+    # -----------------------
+    # Upload history section
+    # -----------------------
+    st.markdown("---")
+    st.header("Upload history / status")
+
+    books = get_all_books()
+    if not books:
+        st.info("No uploads yet. Use the form above to add a book.")
+    else:
+        # Render a simple table and actions
+        for row in books:
+            book_id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id = row
+            with st.container():
+                cols = st.columns([3, 1, 1, 1])
+                cols[0].markdown(f"**{title}**  \n*{filename}*  \nAuthor: {author or '—'}  \nChapter: {chapter or '—'}")
+                cols[1].markdown(f"Uploaded: {uploaded_at}")
+                cols[2].markdown(f"Status: **{status}**")
+                action_col = cols[3]
+                # View summary button (enabled only if summary exists)
+                if summary_id:
+                    if action_col.button("View Summary", key=f"view_{book_id}"):
+                        # Implement navigation to summary page or open a new tab with summary
+                        # Placeholder: instruct user; in your app you'd call st.experimental_set_query_params or navigate to page
+                        st.session_state.setdefault("navigate_to_summary", None)
+                        st.session_state["navigate_to_summary"] = summary_id
+                        st.success(f"Would navigate to summary {summary_id}. Implement page: frontend/summary.py")
+                else:
+                    action_col.write("")  # keep layout
+
+                # Delete button
+                if action_col.button("Delete", key=f"del_{book_id}"):
+                    delete_book_db(book_id)
+                    st.experimental_rerun()
+
+        st.write("Tip: If you implement async background processing in backend, update the 'status' field using update_book_status(book_id, 'processing'/'completed'/'failed').")
+
+    # -----------------------
+    # End
+    # -----------------------

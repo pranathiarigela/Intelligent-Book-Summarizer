@@ -442,3 +442,115 @@ python-docx
 pypdf
 pdfplumber
 
+Task 7: User Dashboard with Navigation
+
+This task delivers the main dashboard interface for the Intelligent Book Summarizer platform. It provides a centralized, user-friendly area to navigate features, monitor activity, and access core functionality after login.
+
+Key Components
+
+Header
+
+Welcome message with the user’s name
+
+Profile menu: View Profile, Settings, Logout
+
+Role badge for admin and standard users
+
+Sidebar Navigation
+
+Dashboard
+
+Upload Book
+
+My Books
+
+Summaries
+
+Settings
+
+Help/Documentation
+
+Admin Only: Manage Users
+
+Quick Stats
+
+Total uploaded books
+
+Total generated summaries
+
+Last upload / summary timestamps
+
+Storage usage (optional)
+
+Recent Activity Feed
+
+Shows uploads, summary generations, and deletions
+
+Human-friendly timestamps (e.g., “2 hours ago”)
+
+Quick Actions
+
+Upload New Book
+
+View All Summaries
+
+Recent Books with actions (View Summary / Generate)
+
+Session & Routing
+
+Redirects unauthenticated users to login
+
+Maintains session_state across pages
+
+Highlights current page in navigation
+
+Supports custom routing without Streamlit’s multipage system
+
+UX Enhancements
+
+Clean empty states for new users
+
+Loading spinners for stats and activity
+
+Optional tooltips and onboarding hints
+
+Task 8 – Text Preprocessing Pipeline
+
+This task implements the backend preprocessing module used to prepare extracted text for summarization.
+
+What’s Included
+
+Clean and normalize raw text
+
+Accurate sentence segmentation (spaCy with fallback)
+
+Language detection and warnings for non-English input
+
+Text statistics: word count, sentence count, reading time, etc.
+
+Chunking based on sentence ranges with configurable size and overlap
+
+Optional stopword removal
+
+Error handling for empty or very long texts
+
+Main File
+backend/preprocessing.py
+
+Key Function
+preprocess_for_summarization(text, chunk_size=1000)
+
+
+Returns:
+
+cleaned text
+
+detected language
+
+list of sentences
+
+text stats
+
+structured chunks
+
+warnings
