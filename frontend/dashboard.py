@@ -1,243 +1,311 @@
+from utils.router import navigate
 # frontend/dashboard.py
-import streamlit as st
-from datetime import datetime, timedelta
+import io
 import time
-from typing import Dict, Any, List
+import streamlit as st
+from datetime import datetime
+from frontend.styles import apply
 
-# Import navigation helpers (shared UI + session)
-from frontend.navigation import (
-    ensure_session_state_keys,
-    header,
-    sidebar_nav,
-    set_page,
-    pretty_time_ago,
-)
+from utils.auth import require_login, session_is_active
+from utils.database_sqlalchemy import SessionLocal
+from utils import crud
+from utils.streamlit_helpers import safe_rerun
 
-# Import DB helpers from your upload module (re-uses its init/db functions)
-# upload.py provides: init_db, get_all_books, insert_book, get_recent etc.
+_upload_backend_fn = None
 try:
-    from frontend import upload as upload_mod
+    # common candidate locations
+    from backend.upload import upload_file as _upload_backend_fn  # type: ignore
 except Exception:
-    # Fallback if import path differs
-    import upload as upload_mod  # type: ignore
+    try:
+        from backend.upload import create_book as _upload_backend_fn  # type: ignore
+    except Exception:
+        _upload_backend_fn = None
 
-# Ensure the DB exists (upload.py already calls init_db when run directly;
-# calling again is idempotent)
-try:
-    if hasattr(upload_mod, "init_db"):
-        upload_mod.init_db()
-except Exception:
-    # ignore DB init errors here; upload page will show DB errors as needed
-    pass
 
-def backend_get_current_user() -> Dict[str, Any] | None:
-    """Return user dict from session or None if not logged in."""
-    if st.session_state.get("logged_in"):
-        return {
-            "user_id": st.session_state.get("user_id"),
-            "name": st.session_state.get("user_name") or st.session_state.get("user_email", "User"),
-            "email": st.session_state.get("user_email"),
-            "role": st.session_state.get("user_role", "user"),
+apply()
+
+def _safe_rerun():
+    """Robust rerun helper: try safe_rerun, fallback to experimental rerun, fallback to tiny state bump."""
+    try:
+        safe_rerun()
+        return
+    except Exception:
+        pass
+    try:
+        st.experimental_rerun()
+        return
+    except Exception:
+        # Last resort: change a harmless session key so the app visibly updates.
+        st.session_state["_force_rerun_marker"] = st.session_state.get("_force_rerun_marker", 0) + 1
+
+
+def render_inline_upload(max_file_size_mb: int = 10):
+    """
+    Inline upload card to appear on dashboard above book list.
+    Accepts PDF/TXT or pasted text. Tries to call backend upload function if available.
+    """
+    st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+    st.markdown("<div style='display:flex; justify-content:space-between; align-items:center;'>", unsafe_allow_html=True)
+    st.markdown("<div style='font-weight:700; font-size:16px;'>Upload a new book</div>", unsafe_allow_html=True)
+    st.markdown("<div class='helper'>PDF or TXT. Max size: {} MB.</div>".format(max_file_size_mb), unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([0.6, 0.4])
+    with col1:
+        uploaded = st.file_uploader("Choose a PDF or TXT file", type=["pdf", "txt"], key="dashboard_inline_file_uploader")
+        pasted = st.text_area("Or paste text directly (optional)", height=200, key="dashboard_inline_pasted")
+        title = st.text_input("Title (optional)", key="dashboard_inline_title")
+        author = st.text_input("Author (optional)", key="dashboard_inline_author")
+    with col2:
+        st.markdown("<div style='margin-top:8px;'>", unsafe_allow_html=True)
+        st.markdown("<div class='helper'>You can either upload a file or paste text. The paste option is useful for excerpts.</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Submit handling
+    if st.button("Upload", key="dashboard_inline_upload_btn"):
+        # Validation
+        if not uploaded and not (pasted and pasted.strip()):
+            st.error("Please upload a file or paste text to upload.")
+            return
+
+        # File size validation if a file was provided
+        if uploaded:
+            try:
+                uploaded.seek(0, io.SEEK_END)
+                size_bytes = uploaded.tell()
+                uploaded.seek(0)
+            except Exception:
+                size_bytes = None
+
+            if size_bytes and (size_bytes > max_file_size_mb * 1024 * 1024):
+                st.error(f"File too large — maximum allowed is {max_file_size_mb} MB.")
+                return
+
+        # Prepare payload
+        payload = {
+            "title": (title.strip() if title else None),
+            "author": (author.strip() if author else None),
+            "file_type": None,
+            "raw_bytes": None,
+            "text": None,
         }
-    return None
 
-def backend_get_stats(user_id: str) -> Dict[str, Any]:
-    """Generate quick stats from the upload DB. Keeps graceful fallbacks."""
-    stats = {"total_books": 0, "total_summaries": 0, "last_upload": None, "last_summary": None, "storage_used_mb": 0.0}
+        if uploaded:
+            name = uploaded.name.lower()
+            payload["file_type"] = "pdf" if name.endswith(".pdf") else "txt"
+            payload["raw_bytes"] = uploaded.read()
+        else:
+            payload["file_type"] = "text"
+            payload["text"] = pasted.strip()
+
+        # Try backend upload if available
+        if _upload_backend_fn:
+            with st.spinner("Uploading and extracting..."):
+                try:
+                    result = None
+                    if payload["raw_bytes"] is not None:
+                        # prefer bytes upload API
+                        try:
+                            result = _upload_backend_fn(file_bytes=payload["raw_bytes"],
+                                                        filename=uploaded.name if uploaded else None,
+                                                        title=payload["title"],
+                                                        author=payload["author"])
+                        except TypeError:
+                            # fallback positional
+                            result = _upload_backend_fn(payload["raw_bytes"], uploaded.name if uploaded else None, payload["title"], payload["author"])
+                    else:
+                        # text-only upload
+                        try:
+                            result = _upload_backend_fn(text=payload["text"], title=payload["title"], author=payload["author"])
+                        except TypeError:
+                            result = _upload_backend_fn(payload["text"], payload["title"], payload["author"])
+
+                    # Interpret result
+                    if isinstance(result, dict):
+                        if result.get("ok") or result.get("success"):
+                            st.success(result.get("message", "Uploaded successfully."))
+                            # refresh dashboard book list
+                            time.sleep(0.5)
+                            # force refresh
+                            navigate("dashboard")
+                        else:
+                            st.error(result.get("message", "Upload failed. Check server logs."))
+                    else:
+                        # If backend returns truthy value (like new book id)
+                        st.success("Uploaded successfully.")
+                        _safe_rerun()
+
+                except Exception as e:
+                    st.error(f"Upload failed: {e}")
+                    st.text(str(e))
+        else:
+            # No backend upload function available — redirect to upload page
+            st.info("Upload handler not found in backend. Redirecting to Upload page for full upload flow.")
+            navigate("upload")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def format_datetime(dt):
     try:
-        rows = upload_mod.get_all_books()
-        stats["total_books"] = len(rows)
-        # Count summaries where summary_id is not null
-        stats["total_summaries"] = sum(1 for r in rows if r[8])  # summary_id index in select
-        if rows:
-            # rows are ordered by uploaded_at DESC in upload.get_all_books()
-            try:
-                last_upload_raw = rows[0][6]  # uploaded_at column
-                # uploaded_at in upload.py is stored as ISO string; try parse
-                if isinstance(last_upload_raw, str):
-                    stats["last_upload"] = datetime.fromisoformat(last_upload_raw)
-                else:
-                    stats["last_upload"] = last_upload_raw
-            except Exception:
-                stats["last_upload"] = None
-        # approximate storage used by summing filesize
-        try:
-            stats["storage_used_mb"] = sum((r[5] or 0) for r in rows) / (1024 * 1024)
-        except Exception:
-            stats["storage_used_mb"] = 0.0
+        return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
-        # DB error — keep defaults and show message in UI
-        pass
-    return stats
+        return str(dt)
 
-def backend_get_recent_activity(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Build a simple recent activity feed from the DB rows (uploads/summaries/deletes)."""
-    acts: List[Dict[str, Any]] = []
-    try:
-        rows = upload_mod.get_all_books()
-        # Convert rows to activity entries (upload & summary existence)
-        for r in rows[:limit]:
-            book_id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id = r
-            ts = None
-            try:
-                ts = datetime.fromisoformat(uploaded_at) if isinstance(uploaded_at, str) else uploaded_at
-            except Exception:
-                ts = None
-            acts.append({"type": "upload", "title": title or filename, "timestamp": ts})
-            if summary_id:
-                acts.append({"type": "summary", "title": title or filename, "timestamp": ts})
-        # keep only the requested number of items
-        acts = acts[:limit]
-    except Exception:
-        pass
-    return acts
+def draw_metrics(db, user):
+    """Top metrics (no topbar rendering here)."""
+    with db.begin():
+        total_books = db.query(crud.Book).filter(crud.Book.user_id == user["id"]).count()
+        total_summaries = db.query(crud.Summary).filter(crud.Summary.user_id == user["id"]).count()
 
-def backend_get_recent_books(user_id: str, limit: int = 3):
-    """Return the last N uploaded books for quick cards."""
-    try:
-        rows = upload_mod.get_all_books()
-        out = []
-        for r in rows[:limit]:
-            book_id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id = r
-            ts = None
-            try:
-                ts = datetime.fromisoformat(uploaded_at) if isinstance(uploaded_at, str) else uploaded_at
-            except Exception:
-                ts = None
-            out.append({
-                "book_id": book_id,
-                "title": title or filename,
-                "uploaded_at": ts,
-                "has_summary": bool(summary_id),
-                "summary_id": summary_id,
-            })
-        return out
-    except Exception:
-        return []
-
-# -------------------------
-# Dashboard UI
-# -------------------------
-def render_dashboard(user: Dict[str, Any]):
-    st.title("Dashboard")
-
-    # Quick stats with spinner
-    with st.spinner("Loading stats..."):
-        time.sleep(0.18)
-        stats = backend_get_stats(user.get("user_id"))
-
-    st.subheader("Quick Stats")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total books", stats.get("total_books", 0))
-    c2.metric("Total summaries", stats.get("total_summaries", 0))
-    c3.metric("Last upload", pretty_time_ago(stats.get("last_upload")))
-    c4.metric("Storage used (MB)", f"{stats.get('storage_used_mb', 0):.1f}")
-
-    st.markdown("---")
-    st.subheader("Quick actions")
-    a1, a2, a3 = st.columns([1, 1, 1])
-    if a1.button("Upload new book"):
-        set_page("upload")
-    if a2.button("View all summaries"):
-        set_page("summaries")
-    if a3.button("My books"):
-        set_page("my_books")
-
-    st.markdown("### Recent books")
-    recent_books = backend_get_recent_books(user.get("user_id"), limit=3)
-    if not recent_books:
-        st.info("You have no uploaded books yet. Click Upload new book to get started.")
-    else:
-        for b in recent_books:
-            cols = st.columns([0.6, 0.2, 0.2])
-            cols[0].markdown(f"**{b['title']}**  \n<small>Uploaded {pretty_time_ago(b['uploaded_at'])}</small>", unsafe_allow_html=True)
-            if b.get("has_summary"):
-                if cols[1].button("View summary", key=f"vs_{b['book_id']}"):
-                    # store navigation payload for summary page (implement summary page to use this)
-                    st.session_state["selected_summary_id"] = b.get("summary_id")
-                    set_page("summaries")
-            else:
-                if cols[2].button("Generate", key=f"gen_{b['book_id']}"):
-                    # Example placeholder: update DB status to 'processing' and instruct backend
-                    try:
-                        if hasattr(upload_mod, "update_book_status"):
-                            upload_mod.update_book_status(b["book_id"], "processing")
-                    except Exception:
-                        pass
-                    st.info("Triggered generation (implement backend job trigger).")
-
-    st.markdown("---")
-    st.subheader("Recent activity")
-    with st.spinner("Fetching recent activity..."):
-        time.sleep(0.12)
-        activities = backend_get_recent_activity(user.get("user_id"), limit=10)
-
-    if not activities:
-        st.info("No recent activity. Try uploading a book.")
-    else:
-        for act in activities:
-            icon = {"upload": "⬆️", "summary": "📝", "delete": "🗑️"}.get(act["type"], "ℹ️")
-            st.markdown(f"{icon} **{act['type'].capitalize()}** — *{act['title']}*  \n<small>{pretty_time_ago(act['timestamp'])}</small>", unsafe_allow_html=True)
-
-    st.markdown("---")
-    with st.expander("Quick tips and first-time user guide"):
-        st.write(
-            "• Upload books in PDF, DOCX, or TXT format.\n\n"
-            "• If no summaries exist, open a book and click Generate summary.\n\n"
-            "• Use Settings to adjust summary length and style."
+    cols = st.columns(3)
+    with cols[0]:
+        st.markdown(
+            "<div class='metric-box'><div style='font-size:18px;font-weight:700'>{}</div>"
+            "<div class='helper'>Your books</div></div>".format(total_books),
+            unsafe_allow_html=True,
+        )
+    with cols[1]:
+        st.markdown(
+            "<div class='metric-box'><div style='font-size:18px;font-weight:700'>{}</div>"
+            "<div class='helper'>Summaries</div></div>".format(total_summaries),
+            unsafe_allow_html=True,
+        )
+    with cols[2]:
+        st.markdown(
+            "<div class='metric-box'><div style='font-size:18px;font-weight:700'>{}</div>"
+            "<div class='helper'>Last updated</div></div>".format(format_datetime(datetime.utcnow())),
+            unsafe_allow_html=True,
         )
 
+def book_card(book, is_owner, is_admin):
+    st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+    st.markdown(f"### {book.title or 'Untitled'}")
+    st.markdown(f"<div class='helper'>Author: {book.author or '—'}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='helper'>Status: <strong>{getattr(book,'status','unknown')}</strong> • Uploaded: {format_datetime(getattr(book,'upload_date', ''))}</div>",
+        unsafe_allow_html=True,
+    )
+    if getattr(book, "word_count", None):
+        st.markdown(f"<div class='helper'>Words: {book.word_count}</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([0.6, 0.4])
+
+    with col1:
+        # unique keys per book
+        if st.button("View details", key=f"dashboard_view_{book.id}"):
+            st.session_state["selected_book_id"] = book.id
+            navigate("book_detail")
+
+        if st.button("Generate summary", key=f"dashboard_gen_{book.id}"):
+            st.session_state["selected_book_id"] = book.id
+            navigate("generate_summary")
+
+    with col2:
+        if (is_owner or is_admin) and st.button("Delete", key=f"dashboard_del_{book.id}"):
+            st.session_state["confirm_delete_book"] = book.id
+            _safe_rerun()
+
+    if st.session_state.get("confirm_delete_book") == book.id:
+        st.error(f"Are you sure you want to delete **{book.title}**?")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Yes, delete permanently", key=f"dashboard_yes_del_{book.id}"):
+                try:
+                    db = SessionLocal()
+                    obj = db.query(crud.Book).get(book.id)
+                    if obj:
+                        db.delete(obj)
+                        db.commit()
+                        db.close()
+                        st.success("Book deleted.")
+                        st.session_state.pop("confirm_delete_book", None)
+                        _safe_rerun()
+                    else:
+                        st.error("Book not found.")
+                except Exception as e:
+                    st.error(f"Failed to delete: {e}")
+        with c2:
+            if st.button("Cancel", key=f"dashboard_cancel_del_{book.id}"):
+                st.session_state.pop("confirm_delete_book", None)
+                _safe_rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def render_book_list(db, user):
+    st.subheader("Your Books")
+
+    # widget keys namespaced to dashboard to avoid collisions
+    q = st.text_input("Search by title or author", key="dashboard_search_q")
+    status_filter = st.selectbox(
+        "Filter by status", ["all", "uploaded", "text_extracted", "summarized"], key="dashboard_status_filter"
+    )
+    per_page = st.selectbox("Items per page", [5, 10, 20], index=1, key="dashboard_per_page")
+
+    query = db.query(crud.Book).filter(crud.Book.user_id == user["id"])
+    if q:
+        like = f"%{q.lower().strip()}%"
+        query = query.filter((crud.Book.title.ilike(like)) | (crud.Book.author.ilike(like)))
+    if status_filter != "all":
+        query = query.filter(crud.Book.status == status_filter)
+
+    page = st.session_state.get("dashboard_books_page", 0)
+    total = query.count()
+    books = query.order_by(crud.Book.upload_date.desc()).offset(page * per_page).limit(per_page).all()
+
+    for book in books:
+        is_owner = (book.user_id == user["id"])
+        is_admin = (user.get("role") == "admin")
+        book_card(book, is_owner, is_admin)
+
+    c1, c2, c3 = st.columns([0.2, 0.6, 0.2])
+    with c1:
+        if st.button("Prev", key="dashboard_prev_books"):
+            if page > 0:
+                st.session_state["dashboard_books_page"] = page - 1
+                _safe_rerun()
+    with c3:
+        if st.button("Next", key="dashboard_next_books"):
+            if (page + 1) * per_page < total:
+                st.session_state["dashboard_books_page"] = page + 1
+                _safe_rerun()
+
+    st.markdown(f"<br><div class='helper'>Showing {len(books)} of {total}</div>", unsafe_allow_html=True)
+
 def main():
-    ensure_session_state_keys()
-
-    # Respect query params (back button friendly)
-    params = st.query_params
-    if "page" in params:
-        st.session_state["page"] = params["page"]
-
-    user = backend_get_current_user()
+    # Do NOT render topbar/sidebar here — app.py already does that once
+    # Enforce session and get user
+    _ = session_is_active(st)
+    user = require_login(st)
     if not user:
-        st.warning("You must be logged in to view the dashboard.")
-        if st.button("Go to Login"):
-            # navigate to your auth page
-            # if your auth page is at frontend/auth.py, set query param or rerun to show it.
-            # simplest: clear page param and rerun; running streamlit with login file directly is common for dev.
-            st.query_params.clear()
-            st.rerun()
-        st.stop()
+        st.warning("Please sign in to access your dashboard.")
+        if st.button("Go to Sign in", key="dashboard_go_signin_btn"):
+            navigate("login")
+        return
 
-    # header + sidebar
-    header(user)
-    sidebar_nav(user)
+    # Header (page content only)
+    st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+    st.markdown(f"<h2>Dashboard</h2>", unsafe_allow_html=True)
+    st.markdown(f"<div class='helper'>Welcome back, <strong>{user['username']}</strong></div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    page = st.session_state.get("page", "dashboard")
-    if page == "dashboard":
-        render_dashboard(user)
-    elif page == "upload":
-        # delegate to your upload page (you already have frontend/upload.py)
-        st.title("Upload Book")
-        st.info("Upload page is implemented in frontend/upload.py. Run that page directly or wire to a multipage app.")
-    elif page == "my_books":
-        st.title("My Books")
-        st.info("This view can be implemented to list books and actions. Upload file provides DB helpers.")
-    elif page == "summaries":
-        st.title("Summaries")
-        st.info("Implement summaries list and single-summary view.")
-    elif page == "settings":
-        st.title("Settings")
-        st.info("User preferences page (implement).")
-    elif page == "help":
-        st.title("Help & Documentation")
-        st.info("Add FAQs and docs here.")
-    elif page == "manage_users":
-        if user.get("role") != "admin":
-            st.error("Access denied. Admins only.")
-        else:
-            st.title("Manage Users")
-            st.info("Admin user management (implement).")
-    else:
-        st.error("Unknown page. Returning to dashboard.")
-        set_page("dashboard")
+    # Database session and main content
+    db = SessionLocal()
+    try:
+        # --- Metrics at the top ---
+        draw_metrics(db, user)
+
+        # --- INLINE UPLOAD SECTION (added here) ---
+        render_inline_upload()
+
+        # --- Book list below upload section ---
+        render_book_list(db, user)
+
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()

@@ -1,171 +1,150 @@
 Intelligent Book Summarization Platform
 
-A modular platform that extracts text from books, preprocesses it, and generates high-quality summaries using modern NLP models. It includes a Streamlit UI, backend services, authentication, a structured database, and a clean architecture ready for scaling.
+A lightweight and efficient platform that allows users to upload books, extract text, preprocess it, and generate summaries. The system includes secure authentication, database-backed storage, search and filter features, and a clean Streamlit interface.
 
-🚀 Features
+Features
 
-Upload books in PDF, DOCX, TXT
+1. Project Setup & Environment
 
-Robust text extraction with fallbacks
+Python virtual environment with all required dependencies
 
-Transformer-based summaries (Hugging Face)
+Streamlit for frontend
 
-User authentication with bcrypt hashing
+SQLAlchemy ORM for database handling
 
-SQLite storage for users, uploads, and summaries
+PDF and text processing libraries (PyPDF2, pdfplumber)
 
-Streamlit-based dashboard and navigation
+Organized project structure with separate backend, frontend, models, and utils modules
 
-Modular backend: extraction, preprocessing, summarization, auth
+Git initialized for version control
 
-Full test suite with pytest
 
-📁 Project Structure
+2. Database Design
+
+SQLite database with the following tables:
+
+Users: user_id, username, email, password_hash, role, timestamps
+
+Books: book_id, user_id, title, author, extracted_text, upload_date, file_type
+
+Summaries: summary_id, book_id, summary_text, summary_length, generation_date, model_used
+
+
+ORM models created using SQLAlchemy
+
+
+3. User Authentication & Authorization
+
+Secure registration and login
+
+Password hashing using bcrypt/werkzeug
+
+Session tracking and session timeout
+
+Role-based access:
+
+Admin: Access all books and summaries
+
+User: Access only their content
+
+
+Logout support
+
+
+4. File Upload & Text Input
+
+Upload support for .txt and .pdf files (max 10MB)
+
+PDF multi-page extraction
+
+Validation for corrupted files and text inputs
+
+Metadata storage (title, author, chapter)
+
+Extracted text stored in database
+
+
+5. UI & Dashboard
+
+Streamlit-based UI
+
+Landing page with project intro and auth forms
+
+Dashboard for uploaded books and summaries
+
+Clean layout working on both desktop and mobile
+
+Basic styling and responsive design
+
+
+6. Text Preprocessing Pipeline
+
+Cleaning and normalization
+
+Handling special characters, spacing, formatting
+
+Optional removal of citations, footnotes, page numbers
+
+Language detection with langdetect
+
+Automatic chunking of long text into 1000–1500 word segments with overlap
+
+
+7. Search & Filter Features
+
+Search books by title, author, or upload date
+
+Filters for:
+
+Newest or oldest
+
+Alphabetical sorting
+
+Summary status (summarized or not)
+
+
+Pagination for large datasets
+
+Clear result display with options to view, summarize, or delete entries
+
+
+Tech Stack
+
+Frontend: Streamlit
+
+Backend: Python
+
+Database: SQLite
+
+ORM: SQLAlchemy
+
+Text Parsing: PyPDF2, pdfplumber
+
+Language Detection: langdetect
+
+Version Control: Git and GitHub
+
+
+Project Structure
+
 project_root/
-│── frontend/        # Streamlit UI pages
-│── backend/         # Core logic (auth, extraction, preprocessing)
-│── utils/           # DB utilities, validators, helpers
-│── models/          # NLP model integration
-│── data/            # Uploads, cache, extracted text
-│── config/          # Logging and configuration
-│── tests/           # Unit & integration tests
-└── README.md
+│
+├── frontend/        # Streamlit pages (login, dashboard, upload, etc.)
+├── backend/         # Auth logic, file handling, text processing
+├── models/          # SQLAlchemy ORM models
+├── utils/           # Helpers (database, validation, etc.)
+├── data/            # Uploaded files and extracted text
+├── config/          # Configurations
+└── tests/           # Unit tests
 
-⚙️ Installation
-git clone <repo-url>
-cd IntelligentBookSummarizer
+How to Run
 
+# Create environment
 python -m venv venv
-.\venv\Scripts\activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
+# Install dependencies
 pip install -r requirements.txt
-# or generate fresh:
-pip freeze > requirements.txt
 
-
-Create a .env file for secrets.
-
-Initialize the database:
-
-python utils/database.py
-
-📌 Task Breakdown
-Task 2 – Database Schema & Utilities
-
-Built a reliable SQLite schema with tables for Users, Books, and Summaries.
-Includes indexing, validation rules, foreign keys, and a full CRUD utility module.
-
-create_user, get_user_by_email
-
-create_book, update_book_status
-
-create_summary, get_summaries_by_user
-
-All DB tests passed successfully.
-
-Task 3 – Authentication UI (Frontend)
-
-Streamlit-based registration and login pages with full client-side validation.
-
-Name, Email, Password, Confirm Password
-
-Regex and strength validation
-
-Login with optional “Remember me”
-
-Clear error messages and navigation
-
-Run:
-
-streamlit run frontend/auth.py
-
-Task 4 – Authentication Backend & Sessions
-
-Secure backend for login and registration.
-
-bcrypt password hashing
-
-Safe login verification
-
-Session state handling (login/logout)
-
-Expiry, rate limits & clean error messages
-
-All auth tests passed
-
-Task 5 – File Upload Interface
-
-Upload TXT, PDF, DOCX with validation, preview, and history.
-
-Size, format, corruption checks
-
-Metadata: title, author, chapter
-
-Preview content (text / pages / paragraphs)
-
-File history with actions
-
-Saves files to data/uploads/
-
-Run:
-
-streamlit run frontend/upload.py
-
-Task 6 – Text Extraction (Backend)
-
-Extracts clean text from multiple formats with fallbacks and error handling.
-
-TXT encoding handling
-
-PDF via PyPDF → pdfplumber fallback
-
-DOCX paragraph extraction
-
-Scanned PDF detection
-
-Word/character stats
-
-Saves extracted text to DB
-
-Task 7 – User Dashboard
-
-Main navigation hub for authenticated users.
-
-Header with user name
-
-Sidebar: Dashboard, Upload, Books, Summaries, Settings
-
-Quick stats and recent activity
-
-Clean routing and session-aware pages
-
-Admin-only options
-
-Task 8 – Text Preprocessing Pipeline
-
-Prepares extracted text for summarization.
-
-Cleanup & normalization
-
-spaCy-based sentence segmentation
-
-Language detection
-
-Word, sentence, reading-time stats
-
-Chunking by sentence ranges
-
-Returns cleaned text + structured chunks
-
-🧪 Testing
-
-All database and backend modules include pytest coverage.
-Example:
-
-pytest -q
-
-📄 Logging
-
-Logs stored in:
-
-logs/app.log
+# Start the app
+streamlit run app.py

@@ -1,8 +1,7 @@
-from utils.router import navigate
 # app.py
 import streamlit as st
 from utils.router import init_router
-init_router(default_route=st.session_state.get("route", "landing"))
+init_router(default_route="landing")
 from frontend.styles import apply
 apply()
 
@@ -52,7 +51,7 @@ ROUTES = {
 
 # ensure a route is set
 if "route" not in st.session_state:
-    navigate("landing")
+    st.session_state["route"] = "landing"  # default landing; will redirect to login if needed
 
 def safe_render_topbar():
     try:

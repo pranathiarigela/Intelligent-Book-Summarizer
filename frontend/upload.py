@@ -1,362 +1,216 @@
+from utils.router import navigate
 # frontend/upload.py
 import os
-import io
-import sqlite3
-import hashlib
-from datetime import datetime,UTC
-
+import time
+from typing import Optional
 import streamlit as st
-from PyPDF2 import PdfReader
-from docx import Document
+from datetime import datetime
 
-# -----------------------
-# Config
-# -----------------------
-DATA_DIR = "data"
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
-DB_PATH = os.path.join(DATA_DIR, "uploads.db")
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-ALLOWED_EXT = {".txt", ".pdf", ".docx"}
+from frontend.styles import apply
+apply()
 
-# Ensure folders exist
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
+from utils.auth import require_login
+from utils.upload_service import handle_file_upload, handle_pasted_text, MAX_FILE_BYTES
+from utils.database_sqlalchemy import SessionLocal
+from utils import crud
+from utils.streamlit_helpers import safe_rerun
 
-# -----------------------
-# Database utilities
-# -----------------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS books (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            title TEXT,
-            author TEXT,
-            chapter TEXT,
-            filename TEXT,
-            filepath TEXT,
-            filesize INTEGER,
-            filehash TEXT,
-            pages INTEGER,
-            uploaded_at TIMESTAMP,
-            status TEXT,
-            summary_id TEXT
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+# ---------------------------
+# Upload page UI
+# ---------------------------
+st.title("Upload book")
 
-def insert_book(record):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO books (user_id, title, author, chapter, filename, filepath, filesize, filehash, pages, uploaded_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            record.get("user_id"),
-            record.get("title"),
-            record.get("author"),
-            record.get("chapter"),
-            record["filename"],
-            record["filepath"],
-            record["filesize"],
-            record["filehash"],
-            record.get("pages"),
-            record["uploaded_at"],
-            record["status"],
-        ),
-    )
-    conn.commit()
-    book_id = cur.lastrowid
-    conn.close()
-    return book_id
+def human_size(n: int) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024:
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.2f}TB"
 
-def get_all_books():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id FROM books ORDER BY uploaded_at DESC")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def recent_uploads_list(db, user_id: int, limit: int = 8):
+    try:
+        items = db.query(crud.Book).filter(crud.Book.user_id == user_id).order_by(crud.Book.upload_date.desc()).limit(limit).all()
+    except Exception:
+        items = []
+    if not items:
+        st.info("No uploads yet.")
+        return
+    st.markdown("### Recent uploads")
+    for b in items:
+        uploaded_at = getattr(b, "upload_date", None)
+        word_count = getattr(b, "word_count", None)
+        st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+        st.markdown(f"**{b.title or 'Untitled'}**")
+        st.markdown(f"<div class='helper'>Author: {b.author or '—'} • Uploaded: {uploaded_at}</div>", unsafe_allow_html=True)
+        if word_count:
+            st.markdown(f"<div class='helper'>Words: {word_count}</div>", unsafe_allow_html=True)
+        cols = st.columns([0.6, 0.4])
+        with cols[0]:
+            if st.button("View", key=f"view_recent_{b.id}"):
+                st.session_state["selected_book_id"] = b.id
+                navigate("book_detail")
+        with cols[1]:
+            if st.button("Generate summary", key=f"gen_recent_{b.id}"):
+                st.session_state["selected_book_id"] = b.id
+                navigate("generate_summary")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-def delete_book_db(book_id):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT filepath FROM books WHERE id = ?", (book_id,))
-    r = cur.fetchone()
-    if r and r[0] and os.path.exists(r[0]):
+
+def _get_current_user_id(user: dict) -> Optional[int]:
+    """
+    Robustly return the numeric user id from session/user object.
+    Tries common keys: 'id', 'user_id', session_state['user_id'].
+    """
+    if not user:
+        return None
+    uid = None
+    try:
+        uid = user.get("id") or user.get("user_id") or user.get("user_id")
+    except Exception:
+        uid = None
+    if not uid:
+        uid = st.session_state.get("user_id")
+    # ensure integer or None
+    try:
+        if uid is not None:
+            return int(uid)
+    except Exception:
+        return None
+    return None
+
+
+def file_upload_section(user):
+    st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+    st.subheader("Upload file")
+    st.markdown('<div class="helper">Upload a PDF or TXT file (max 10 MB). We will extract text and store it for summarization.</div>', unsafe_allow_html=True)
+
+    with st.form("file_upload_form"):
+        uploaded_file = st.file_uploader("Choose a file", type=["pdf", "txt", "docx"])
+        title = st.text_input("Title (optional)", value="")
+        author = st.text_input("Author (optional)", value="")
+        submit = st.form_submit_button("Upload and extract", key="upload_submit_btn")
+
+    if submit:
+        if not uploaded_file:
+            st.error("Please choose a file first.")
+            return
+
+        # read bytes
         try:
-            os.remove(r[0])
+            file_bytes = uploaded_file.read()
+        except Exception as e:
+            st.error(f"Failed to read file: {e}")
+            return
+
+        try:
+            size_bytes = len(file_bytes)
+            st.markdown(f"<div class='helper'>File size: {human_size(size_bytes)}</div>", unsafe_allow_html=True)
+            if size_bytes > MAX_FILE_BYTES:
+                st.error(f"File exceeds max allowed size of {human_size(MAX_FILE_BYTES)}.")
+                return
         except Exception:
             pass
-    cur.execute("DELETE FROM books WHERE id = ?", (book_id,))
-    conn.commit()
-    conn.close()
 
-def update_book_status(book_id, status, summary_id=None):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    if summary_id:
-        cur.execute("UPDATE books SET status = ?, summary_id = ? WHERE id = ?", (status, summary_id, book_id))
-    else:
-        cur.execute("UPDATE books SET status = ? WHERE id = ?", (status, book_id))
-    conn.commit()
-    conn.close()
+        # determine user id
+        user_id = _get_current_user_id(user)
 
-# -----------------------
-# Helpers
-# -----------------------
-def get_extension(filename):
-    return os.path.splitext(filename)[1].lower()
+        # call upload service
+        with st.spinner("Uploading and extracting text... (this may take a few seconds)"):
+            res = handle_file_upload(
+                file_bytes=file_bytes,
+                original_filename=uploaded_file.name,
+                user_id=user_id,
+                title=title.strip() or None,
+                author=author.strip() or None,
+            )
 
-def compute_hash(file_bytes: bytes) -> str:
-    h = hashlib.sha256()
-    h.update(file_bytes)
-    return h.hexdigest()
+        if not isinstance(res, dict):
+            st.error("Unexpected response from upload service.")
+            return
 
-def save_uploaded_file_to_disk(uploaded_file, dest_path):
-    # uploaded_file: Streamlit UploadedFile
-    with open(dest_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+        if res.get("ok"):
+            if res.get("duplicate"):
+                st.info("This file appears to be a duplicate of an existing upload.")
+                existing_id = res.get("book_id")
+                if existing_id:
+                    st.markdown(f"[Open existing book](:#{existing_id})")
+            else:
+                st.success("Upload and extraction complete.")
+                wc = res.get("word_count")
+                if wc is not None:
+                    st.markdown(f"<div class='helper'>Words extracted: <strong>{wc}</strong></div>", unsafe_allow_html=True)
+                navigate("dashboard")
+        else:
+            # handle OCR required case specially
+            if res.get("ocr_required"):
+                st.error("This PDF appears to be scanned (image-only). OCR is required to extract text.")
+                st.markdown(
+                    "To enable OCR, install the following on the server/development machine:<ul>"
+                    "<li><code>pip install pytesseract pdf2image</code></li>"
+                    "<li>Install Poppler (OS package) and ensure `pdftoppm` is on PATH</li>"
+                    "</ul>",
+                    unsafe_allow_html=True,
+                )
+                st.info(f"Saved file path: {res.get('stored_path')}")
+                return
+            st.error(res.get("message", "Upload failed."))
 
-def read_txt_preview(file_bytes, limit=500):
-    try:
-        text = file_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            text = file_bytes.decode("latin-1")
-        except Exception:
-            return None
-    preview = text[:limit]
-    return preview
+    st.markdown("</div>", unsafe_allow_html=True)
 
-def pdf_num_pages(file_stream) -> int:
-    try:
-        reader = PdfReader(file_stream)
-        return len(reader.pages)
-    except Exception:
-        return None
 
-def docx_basic_info(file_stream):
-    try:
-        doc = Document(file_stream)
-        paragraph_count = sum(1 for _ in doc.paragraphs)
-        first_par = doc.paragraphs[0].text if paragraph_count > 0 else ""
-        return {"paragraphs": paragraph_count, "first_par": first_par}
-    except Exception:
-        return None
+def pasted_text_section(user):
+    st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+    st.subheader("Paste text")
+    st.markdown('<div class="helper">If you have text to paste (for short excerpts or chapters), paste it here. We store it as a book record.</div>', unsafe_allow_html=True)
 
-# -----------------------
-# UI
-# -----------------------
+    pasted = st.text_area("Paste text", height=240, key="pasted_text_area")
+    title = st.text_input("Title for pasted text (optional)", key="pasted_title")
+    if st.button("Save pasted text", key="pasted_save_btn"):
+        if not pasted or not pasted.strip():
+            st.error("Pasted text cannot be empty.")
+        else:
+            user_id = _get_current_user_id(user)
+            with st.spinner("Saving text..."):
+                res = handle_pasted_text(
+                    pasted_text=pasted,
+                    user_id=user_id,
+                    title=title.strip() or "Pasted text",
+                    author=None,
+                )
+            if res.get("ok"):
+                st.success("Text saved successfully.")
+                navigate("dashboard")
+            else:
+                st.error(res.get("message", "Failed to save pasted text."))
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def main():
-    st.set_page_config(page_title="Upload Book for Summarization", layout="wide")
-    init_db()
+    user = require_login(st)
+    if not user:
+        st.warning("Please sign in to upload files.")
+        if st.button("Go to sign in", key="upload_goto_signin_btn"):
+            navigate("login")
+        return
 
-    st.title("Upload Book for Summarization")
+    st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+    st.markdown(f"<h2>Upload</h2><div class='helper'>Logged in as <strong>{user.get('username') or st.session_state.get('user_name','')}</strong></div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("Instructions", expanded=True):
-        st.markdown(
-            """
-            Supported formats: **.txt, .pdf, .docx**  
-            Maximum file size: **10 MB**.  
-            Upload will validate the file and store it. After upload you can click **Upload & Process** to trigger the backend summarization workflow.
-            """
-        )
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        uploaded_file = st.file_uploader(
-            "Choose a book file",
-            type=["txt", "pdf", "docx"],
-            help="Maximum file size: 10MB"
-        )
-    with col2:
-        st.write("Metadata (optional)")
-        title_input = st.text_input("Book Title")
-        author_input = st.text_input("Author")
-        chapter_input = st.text_input("Chapter / Section")
-
-    # Validation & Preview area
-    if uploaded_file is not None:
-        filename = uploaded_file.name
-        ext = get_extension(filename)
-        filesize = uploaded_file.size
-
-        # Basic validations
-        if ext not in ALLOWED_EXT:
-            st.error(f"Unsupported file extension: {ext}. Allowed: {', '.join(ALLOWED_EXT)}")
-            st.stop()
-
-        if filesize == 0:
-            st.error("Uploaded file is empty.")
-            st.stop()
-
-        if filesize > MAX_FILE_SIZE:
-            st.error(f"File too large ({filesize} bytes). Maximum is {MAX_FILE_SIZE} bytes.")
-            st.stop()
-
-        # Read bytes for validation + duplicate detection
-        file_bytes = uploaded_file.read()
-        filehash = compute_hash(file_bytes)
-        # Reset buffer pointer for downstream readers
-        uploaded_file.seek(0)
-
-        # Check duplicate by filehash in DB
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT id, title, filename, uploaded_at FROM books WHERE filehash = ?", (filehash,))
-        duplicate = cur.fetchone()
-        conn.close()
-        if duplicate:
-            st.warning(f"A file with the same content was uploaded earlier ({duplicate[2]} on {duplicate[3]}).")
-            if not st.checkbox("Proceed anyway and upload duplicate"):
-                st.stop()
-
-        st.subheader("File preview & info")
-        st.write(f"**Filename:** {filename}")
-        st.write(f"**Size:** {filesize} bytes")
-        st.write(f"**Uploaded (in this form):** {datetime.now(UTC).isoformat()}")
-
-        preview_cols = st.columns([1, 1])
-        with preview_cols[0]:
-            if ext == ".txt":
-                preview = read_txt_preview(file_bytes, limit=500)
-                if preview is None:
-                    st.error("Could not decode TXT file. It may use an unsupported encoding or be corrupted.")
-                else:
-                    st.text_area("TXT preview (first 500 chars)", preview, height=200)
-            elif ext == ".pdf":
-                try:
-                    # For PyPDF2 we need a bytes stream
-                    stream = io.BytesIO(file_bytes)
-                    pages = pdf_num_pages(stream)
-                    if pages is None:
-                        st.error("Could not read PDF. It might be corrupted or scanned (image-only).")
-                    else:
-                        st.write(f"Number of pages: **{pages}**")
-                except Exception as e:
-                    st.error("Error reading PDF: " + str(e))
-            elif ext == ".docx":
-                try:
-                    stream = io.BytesIO(file_bytes)
-                    info = docx_basic_info(stream)
-                    if info is None:
-                        st.error("Could not read DOCX. It might be corrupted.")
-                    else:
-                        st.write(f"Paragraphs: **{info['paragraphs']}**")
-                        if info['first_par']:
-                            st.text_area("First paragraph", info['first_par'], height=150)
-                except Exception as e:
-                    st.error("Error reading DOCX: " + str(e))
-
-        # Pre-fill title from filename if title_input is empty
-        if not title_input:
-            inferred_title = os.path.splitext(filename)[0]
-            st.info(f"Auto-filled title from filename: {inferred_title}")
-            title_input = st.text_input("Book Title (edit if needed)", value=inferred_title)
-
-        # Upload & Process button
-        if st.button("Upload & Process"):
-            # Save file to disk
-            timestamp = datetime.now(UTC).isoformat()
-            safe_filename = f"{int(datetime.now(UTC).timestamp())}_{filename}"
-            dest_path = os.path.join(UPLOAD_DIR, safe_filename)
-
-            try:
-                with st.spinner("Saving file..."):
-                    # write bytes to disk
-                    with open(dest_path, "wb") as f:
-                        f.write(file_bytes)
-
-                # determine pages for storing metadata
-                pages = None
-                if ext == ".pdf":
-                    try:
-                        pages = pdf_num_pages(io.BytesIO(file_bytes))
-                    except Exception:
-                        pages = None
-                elif ext == ".docx":
-                    try:
-                        info = docx_basic_info(io.BytesIO(file_bytes))
-                        pages = info["paragraphs"] if info else None
-                    except Exception:
-                        pages = None
-
-                rec = {
-                    "user_id": None,
-                    "title": title_input or inferred_title,
-                    "author": author_input,
-                    "chapter": chapter_input,
-                    "filename": filename,
-                    "filepath": dest_path,
-                    "filesize": filesize,
-                    "filehash": filehash,
-                    "pages": pages,
-                    "uploaded_at": timestamp,
-                    "status": "uploaded"
-                }
-                book_id = insert_book(rec)
-                st.success(f"File saved and metadata stored (book id: {book_id}).")
-
-                # Show progress for file-handling step
-                progress_bar = st.progress(0)
-                for i in range(5):
-                    progress_bar.progress((i + 1) * 20)
-                progress_bar.empty()
-
-                st.info("To start summarization, the frontend should call the backend orchestration endpoint for this book_id.")
-                st.write("Example (placeholder):")
-                st.code(f'POST /api/summarize?book_id={book_id}  # call your backend job runner/orchestrator', language="bash")
-
-                # Optionally update status to processing here if you trigger backend immediately
-                # update_book_status(book_id, "processing")
-            except Exception as e:
-                st.error(f"Failed to save file: {e}")
-
-    # -----------------------
-    # Upload history section
-    # -----------------------
+    file_upload_section(user)
     st.markdown("---")
-    st.header("Upload history / status")
+    pasted_text_section(user)
 
-    books = get_all_books()
-    if not books:
-        st.info("No uploads yet. Use the form above to add a book.")
-    else:
-        # Render a simple table and actions
-        for row in books:
-            book_id, title, author, chapter, filename, filesize, uploaded_at, status, summary_id = row
-            with st.container():
-                cols = st.columns([3, 1, 1, 1])
-                cols[0].markdown(f"**{title}**  \n*{filename}*  \nAuthor: {author or '—'}  \nChapter: {chapter or '—'}")
-                cols[1].markdown(f"Uploaded: {uploaded_at}")
-                cols[2].markdown(f"Status: **{status}**")
-                action_col = cols[3]
-                # View summary button (enabled only if summary exists)
-                if summary_id:
-                    if action_col.button("View Summary", key=f"view_{book_id}"):
-                        # Implement navigation to summary page or open a new tab with summary
-                        # Placeholder: instruct user; in your app you'd call st.experimental_set_query_params or navigate to page
-                        st.session_state.setdefault("navigate_to_summary", None)
-                        st.session_state["navigate_to_summary"] = summary_id
-                        st.success(f"Would navigate to summary {summary_id}. Implement page: frontend/summary.py")
-                else:
-                    action_col.write("")  # keep layout
+    db = SessionLocal()
+    try:
+        recent_uploads_list(db, user_id=_get_current_user_id(user), limit=8)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
-                # Delete button
-                if action_col.button("Delete", key=f"del_{book_id}"):
-                    delete_book_db(book_id)
-                    st.experimental_rerun()
 
-        st.write("Tip: If you implement async background processing in backend, update the 'status' field using update_book_status(book_id, 'processing'/'completed'/'failed').")
-
-    # -----------------------
-    # End
-    # -----------------------
+if __name__ == "__main__":
+    main()

@@ -4,7 +4,8 @@ import bcrypt
 import re
 import logging
 import time
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger("auth")
@@ -17,7 +18,7 @@ logger.setLevel(logging.INFO)
 # Defaults — keep these paths in sync with other modules
 DEFAULT_DB = "data/app.db"
 
-# Simple in-process rate limiting (keeps your previous behavior)
+# Simple in-process rate limiting (keeps previous behavior)
 _failed_attempts = {}
 LOCKOUT_SECONDS = 300
 MAX_ATTEMPTS = 5
@@ -52,10 +53,31 @@ def init_user_table(db_path: str = DEFAULT_DB) -> None:
         conn.close()
 
 
+def init_password_resets_table(db_path: str = DEFAULT_DB) -> None:
+    """Create password_resets table if missing (idempotent)."""
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_resets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+    finally:
+        conn.close()
+
+
 # -------------------------
-# Validation helpers (same behaviour)
+# Validation helpers
 # -------------------------
-def validate_name(name: str) -> (bool, str): # pyright: ignore[reportInvalidTypeForm]
+def validate_name(name: str) -> (bool, str):  # pyright: ignore[reportInvalidTypeForm]
     if not name or not isinstance(name, str):
         return False, "Name is required."
     name = name.strip()
@@ -66,7 +88,7 @@ def validate_name(name: str) -> (bool, str): # pyright: ignore[reportInvalidType
     return True, ""
 
 
-def validate_email(email: str) -> (bool, str): # pyright: ignore[reportInvalidTypeForm]
+def validate_email(email: str) -> (bool, str):  # pyright: ignore[reportInvalidTypeForm]
     if not email or not isinstance(email, str):
         return False, "Email is required."
     email = email.strip()
@@ -75,7 +97,7 @@ def validate_email(email: str) -> (bool, str): # pyright: ignore[reportInvalidTy
     return True, ""
 
 
-def validate_password(password: str) -> (bool, str): # pyright: ignore[reportInvalidTypeForm]
+def validate_password(password: str) -> (bool, str):  # pyright: ignore[reportInvalidTypeForm]
     if not password or not isinstance(password, str):
         return False, "Password is required."
     if len(password) < 8:
@@ -92,7 +114,7 @@ def validate_password(password: str) -> (bool, str): # pyright: ignore[reportInv
 
 
 # -------------------------
-# Registration / Login API (frontend expects these)
+# Registration / Login API
 # -------------------------
 def register_user(
     name: str,
@@ -185,5 +207,108 @@ def login_user(email: str, password: str, db_path: str = DEFAULT_DB) -> Dict[str
     except Exception:
         logger.exception("Login operation failed")
         return {"success": False, "message": "Login failed."}
+    finally:
+        conn.close()
+
+
+# -------------------------
+# Password reset flow
+# -------------------------
+def initiate_password_reset(email: str, db_path: str = DEFAULT_DB, token_lifetime_minutes: int = 60) -> Dict[str, Any]:
+    """
+    Create a password reset token and store it in the database.
+    Returns {"success": True, "message": "...", "token": token} on success.
+    In production, you would email the token (or a link containing it) and NOT return it.
+    """
+    ok, msg = validate_email(email)
+    if not ok:
+        return {"success": False, "message": msg}
+
+    init_user_table(db_path)
+    init_password_resets_table(db_path)
+
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.cursor()
+        # Check user exists
+        cur.execute("SELECT email FROM users WHERE email = ?", (email.strip().lower(),))
+        row = cur.fetchone()
+        if not row:
+            # don't reveal existence — respond success for security best practice,
+            # but do not create token
+            return {"success": True, "message": "If that email exists, reset instructions were sent."}
+
+        token = secrets.token_urlsafe(24)
+        now = datetime.utcnow()
+        expires = now + timedelta(minutes=token_lifetime_minutes)
+
+        with conn:
+            cur.execute(
+                "INSERT INTO password_resets (email, token, created_at, expires_at, used) VALUES (?, ?, ?, ?, ?)",
+                (email.strip().lower(), token, now.isoformat(), expires.isoformat(), 0),
+            )
+            conn.commit()
+
+        # Return token for testing/dev. In prod, send via email and return a generic message.
+        return {"success": True, "message": "Password reset initiated.", "token": token}
+    except Exception:
+        logger.exception("Failed to create password reset token")
+        return {"success": False, "message": "Failed to initiate password reset."}
+    finally:
+        conn.close()
+
+
+def verify_reset_token(token: str, db_path: str = DEFAULT_DB) -> Optional[str]:
+    """
+    Verify token and return associated email if valid and unused; otherwise return None.
+    """
+    if not token:
+        return None
+    init_password_resets_table(db_path)
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT email, expires_at, used FROM password_resets WHERE token = ?", (token,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        if row["used"]:
+            return None
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if datetime.utcnow() > expires_at:
+            return None
+        return row["email"]
+    except Exception:
+        logger.exception("Failed to verify reset token")
+        return None
+    finally:
+        conn.close()
+
+
+def reset_password_with_token(token: str, new_password: str, db_path: str = DEFAULT_DB) -> Dict[str, Any]:
+    """
+    Reset the user's password if token valid. Marks token as used.
+    """
+    ok, msg = validate_password(new_password)
+    if not ok:
+        return {"success": False, "message": msg}
+
+    email = verify_reset_token(token, db_path=db_path)
+    if not email:
+        return {"success": False, "message": "Invalid or expired token."}
+
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            cur = conn.cursor()
+            salt = bcrypt.gensalt()
+            pw_hash = bcrypt.hashpw(new_password.encode("utf-8"), salt)
+            cur.execute("UPDATE users SET password_hash = ? WHERE email = ?", (pw_hash, email))
+            cur.execute("UPDATE password_resets SET used = 1 WHERE token = ?", (token,))
+            conn.commit()
+        return {"success": True, "message": "Password has been reset."}
+    except Exception:
+        logger.exception("Failed to reset password")
+        return {"success": False, "message": "Failed to reset password."}
     finally:
         conn.close()

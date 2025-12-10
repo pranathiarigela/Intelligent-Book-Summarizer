@@ -1,135 +1,106 @@
+from utils.router import navigate
 # frontend/register.py
 import time
 import streamlit as st
 import re
+import traceback
+from utils.auth import register_user
+from frontend.styles import apply
+from utils.streamlit_helpers import safe_rerun
+apply()
 
-# ---------------------------
-# Styles (reuse from old file)
-# ---------------------------
-PAGE_CSS = """
-<style>
-    .auth-card {
-        background: #ffffff;
-        border-radius: 12px;
-        box-shadow: 0 6px 18px rgba(0,0,0,0.08);
-        padding: 20px;
-        margin-bottom: 18px;
-    }
-    .field-error {
-        color: #d93025;
-        font-size: 0.9rem;
-        margin-top: 6px;
-    }
-    .helper {
-        color: #6b6b6b;
-        font-size: 0.9rem;
-    }
-</style>
-"""
-st.markdown(PAGE_CSS, unsafe_allow_html=True)
+USERNAME_REGEX = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}$")
 
-# ---------------------------
-# Validation helpers
-# ---------------------------
-NAME_REGEX = re.compile(r"^[A-Za-z ]{2,}$")
-EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
-PASSWORD_REGEX = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{8,}$")
-
-def validate_name(name: str) -> str:
-    if not name.strip():
-        return "Name cannot be empty."
-    if not NAME_REGEX.match(name.strip()):
-        return "Enter a valid name."
+def validate_username(username: str) -> str:
+    if not username or not username.strip():
+        return "Username cannot be empty."
+    if not USERNAME_REGEX.match(username.strip()):
+        return "Username must be 3–32 characters, letters, numbers, ., _, or -."
     return ""
 
 def validate_email(email: str) -> str:
+    if not email or not email.strip():
+        return "Email cannot be empty."
     if not EMAIL_REGEX.match(email.strip()):
-        return "Enter a valid email."
+        return "Enter a valid email address."
     return ""
 
-def validate_password(password: str) -> str:
-    if not PASSWORD_REGEX.match(password):
-        return (
-            "Password must contain uppercase, lowercase, digit, "
-            "and special character (min 8 chars)."
-        )
+def validate_passwords(pw: str, pw2: str) -> str:
+    if not pw:
+        return "Password cannot be empty."
+    if len(pw) < 6:
+        return "Password should be at least 6 characters."
+    if pw != pw2:
+        return "Passwords do not match."
     return ""
 
-def validate_confirm(pw, cpw):
-    return "" if pw == cpw else "Passwords do not match."
+st.title("Create account")
 
-# ---------------------------
-# Optional backend function import
-# ---------------------------
-try:
-    from backend.auth import register_user  # type: ignore
-    register_user_backend = register_user
-except:
-    register_user_backend = None
-
-# ---------------------------
-# UI: Registration Page
-# ---------------------------
-st.title("Create an account")
-
-def registration_form():
+def register_form():
     st.markdown('<div class="auth-card">', unsafe_allow_html=True)
-    st.subheader("Register")
-    st.markdown('<div class="helper">Fill in the details to get started.</div>', unsafe_allow_html=True)
+    st.subheader("Sign up")
+    st.markdown('<div class="helper">Create a free account to upload books and generate summaries.</div>', unsafe_allow_html=True)
 
     with st.form("register_form"):
-        name = st.text_input("Full Name", key="reg_name")
-        email = st.text_input("Email", key="reg_email")
-        pw = st.text_input("Password", type="password", key="reg_pw")
-        cpw = st.text_input("Confirm Password", type="password", key="reg_cpw")
-        submit_btn = st.form_submit_button("Register")
+        username = st.text_input("Username", key="reg_username", placeholder="your-username")
+        email = st.text_input("Email", key="reg_email", placeholder="you@example.com")
+        password = st.text_input("Password", type="password", key="reg_password")
+        password2 = st.text_input("Confirm password", type="password", key="reg_password2")
+        agree = st.checkbox("I agree to the terms and privacy policy", key="reg_terms")
+        submit = st.form_submit_button("Create account", key="register_submit_btn")
 
-    if submit_btn:
-        err_name = validate_name(name)
-        err_email = validate_email(email)
-        err_pw = validate_password(pw)
-        err_cpw = validate_confirm(pw, cpw)
-
-        errors = [err_name, err_email, err_pw, err_cpw]
-        errors = [e for e in errors if e]
-
-        if errors:
-            for e in errors:
-                st.markdown(f'<div class="field-error">{e}</div>', unsafe_allow_html=True)
+    if submit:
+        un_err = validate_username(username)
+        email_err = validate_email(email)
+        pw_err = validate_passwords(password, password2)
+        if not agree:
+            st.markdown(f'<div class="field-error">You must agree to the terms.</div>', unsafe_allow_html=True)
+            return
+        if un_err:
+            st.markdown(f'<div class="field-error">{un_err}</div>', unsafe_allow_html=True)
+            return
+        if email_err:
+            st.markdown(f'<div class="field-error">{email_err}</div>', unsafe_allow_html=True)
+            return
+        if pw_err:
+            st.markdown(f'<div class="field-error">{pw_err}</div>', unsafe_allow_html=True)
             return
 
         with st.spinner("Creating your account..."):
             time.sleep(0.8)
+            try:
+                res = register_user(username=username.strip(), email=email.strip().lower(), password=password)
+            except Exception as e:
+                st.error(f"Registration failed: {e}")
+                st.text(traceback.format_exc())
+                return
 
-            if register_user_backend:
-                try:
-                    result = register_user_backend(
-                        name=name.strip(),
-                        email=email.strip().lower(),
-                        password=pw,
-                    )
-                    if result.get("success"):
-                        st.success("Account created successfully.")
-                        st.query_params.update({"page": "login"})
-                        st.session_state["route"] = "login"
-                        st.rerun()
-
+            if isinstance(res, dict):
+                if res.get("ok"):
+                    st.success("Account created successfully. Please sign in.")
+                    try:
+                        navigate("login")
+                    except Exception:
+                        pass
+                else:
+                    err = res.get("error") or res.get("message") or "Registration failed."
+                    if err == "username_taken":
+                        st.error("That username is already taken. Try another.")
+                    elif err == "email_taken":
+                        st.error("An account with that email already exists.")
                     else:
-                        st.error(result.get("message", "Registration failed."))
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+                        st.error(err)
             else:
-                st.success("Account validated (backend not connected).")
-                st.session_state["route"] = "login"
-                st.rerun()
+                st.error("Registration failed. Please try again later.")
 
-    st.info("Already have an account?")
-    if st.button("Sign in"):
-        st.session_state["route"] = "login"
-        st.rerun()
+    st.markdown("<div style='display:flex; justify-content:space-between; align-items:center;'>", unsafe_allow_html=True)
+    if st.button("Back to login", key="register_back_btn"):
+        navigate("login")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def main():
-    registration_form()
+    register_form()
 
 if __name__ == "__main__":
     main()
