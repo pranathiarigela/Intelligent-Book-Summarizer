@@ -1,8 +1,10 @@
-from utils.router import navigate
 # app.py
 import streamlit as st
-from utils.router import init_router
+
+# initialize router early so history state exists
+from utils.router import init_router, navigate
 init_router(default_route=st.session_state.get("route", "landing"))
+
 from frontend.styles import apply
 apply()
 
@@ -29,6 +31,8 @@ import frontend.register as register_page
 import frontend.dashboard as dashboard_page
 import frontend.upload as upload_page
 import frontend.profile as profile_page
+import frontend.book_detail as page
+
 # optional pages (if present)
 try:
     import frontend.dashboard_search as dashboard_search_page
@@ -45,12 +49,12 @@ ROUTES = {
     "profile": profile_page,
     "search": dashboard_search_page,        # may be None
     # placeholder keys your UI uses:
-    "book_detail": None,
+    "book_detail": page,
     "generate_summary": None,
     "manage_users": None,
 }
 
-# ensure a route is set
+# ensure a route is set (init_router already set default), keep this for safety
 if "route" not in st.session_state:
     navigate("landing")
 
@@ -66,7 +70,7 @@ def safe_render_topbar():
 def render_page(route_key: str):
     """
     Render the page associated with route_key.
-    Each page module is expected to expose main().
+    Each page module is expected to expose main(). 
     If route_key maps to None, show a placeholder message.
     """
     mod = ROUTES.get(route_key)
@@ -101,7 +105,6 @@ def main():
         # if sidebar fails, continue
         pass
 
-    # Simple route chooser (for debugging) — hidden unless shift pressed (optional)
     # Render the selected page
     route = st.session_state.get("route", "dashboard")
     render_page(route)
@@ -111,5 +114,6 @@ def main():
         st.markdown("**Route:** " + str(st.session_state.get("route")))
         if "user" in st.session_state:
             st.markdown(f"**User:** {st.session_state['user'].get('username')} ({st.session_state['user'].get('role')})")
+
 if __name__ == "__main__":
     main()

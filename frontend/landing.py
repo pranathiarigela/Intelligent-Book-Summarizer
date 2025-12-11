@@ -1,8 +1,9 @@
-from utils.router import navigate
 # frontend/landing.py
 import streamlit as st
 from frontend.styles import apply
-from utils.streamlit_helpers import safe_rerun
+from utils.router import navigate
+# keep safe_rerun import only if you need it elsewhere; navigation forces rerun already
+# from utils.streamlit_helpers import safe_rerun
 
 apply()
 
@@ -13,29 +14,15 @@ def hero_ctas():
     with cols[1]:
         # unique key to avoid any collision with previous buttons
         if st.button("Get started — Create account", key="landing_cta_register_v3"):
+            # push to history so Back works
             navigate("register")
-            # try safe rerun, fallback to experimental rerun for compatibility
-            try:
-                safe_rerun()
-            except Exception:
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    # last resort: force a minor state change and let user click once more
-                    st.session_state["_force_rerun_marker"] = st.session_state.get("_force_rerun_marker", 0) + 1
 
     # spacer in cols[2]
 
     with cols[3]:
         if st.button("Sign in", key="landing_cta_signin_v3"):
+            # push to history so Back works
             navigate("login")
-            try:
-                safe_rerun()
-            except Exception:
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    st.session_state["_force_rerun_marker"] = st.session_state.get("_force_rerun_marker", 0) + 1
 
 
 def main():
